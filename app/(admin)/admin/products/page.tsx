@@ -6,6 +6,7 @@ import { AdminHeader } from '@/components/admin/header';
 import { StatusBadge } from '@/components/status-badge';
 import { supabase, Product } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/utils';
+import { deleteStoredDemoProduct, getStoredDemoProducts } from '@/lib/demo-products';
 import { toast } from 'sonner';
 import Link from 'next/link';
 import {
@@ -18,6 +19,13 @@ const PEXELS_PRODUCTS = [
   'https://images.pexels.com/photos/1152077/pexels-photo-1152077.jpeg?w=200&h=200&fit=crop',
   'https://images.pexels.com/photos/3394650/pexels-photo-3394650.jpeg?w=200&h=200&fit=crop',
   'https://images.pexels.com/photos/437037/pexels-photo-437037.jpeg?w=200&h=200&fit=crop',
+];
+
+const DEMO_PRODUCTS = [
+  { id: 'd1', name: 'Premium Hard Case Luggage Bag', sku: 'LUG-001', wholesale_price: 1200, retail_price: 1650, status: 'active', brand: 'TravelPro', images: [PEXELS_PRODUCTS[0]], categories: { name: 'Luggage & Travel' }, inventory: { total_stock: 48, available_stock: 45 } },
+  { id: 'd2', name: 'Travel Backpack', sku: 'BPK-002', wholesale_price: 550, retail_price: 850, status: 'active', brand: 'Wildcraft', images: [PEXELS_PRODUCTS[1]], categories: { name: 'Luggage & Travel' }, inventory: { total_stock: 120, available_stock: 118 } },
+  { id: 'd3', name: 'Wireless Earbuds', sku: 'EAR-003', wholesale_price: 850, retail_price: 1299, status: 'active', brand: 'SoundMax', images: [PEXELS_PRODUCTS[2]], categories: { name: 'Electronics' }, inventory: { total_stock: 25, available_stock: 12 } },
+  { id: 'd4', name: 'Analog Watch', sku: 'WAT-004', wholesale_price: 1050, retail_price: 1650, status: 'active', brand: 'Fastrack', images: [PEXELS_PRODUCTS[3]], categories: { name: 'Accessories' }, inventory: { total_stock: 60, available_stock: 55 } },
 ];
 
 export default function ProductsPage() {
@@ -34,7 +42,10 @@ export default function ProductsPage() {
       .from('products')
       .select('*, categories(name), inventory(total_stock, available_stock)')
       .order('created_at', { ascending: false });
-    setProducts((data ?? []) as Product[]);
+
+    const storedProducts = getStoredDemoProducts();
+    const databaseProducts = (data ?? []) as Product[];
+    setProducts(databaseProducts.length ? [...storedProducts, ...databaseProducts] as Product[] : [...storedProducts, ...DEMO_PRODUCTS] as Product[]);
     setLoading(false);
   }, []);
 
@@ -48,20 +59,20 @@ export default function ProductsPage() {
 
   async function deleteProduct() {
     if (!deleteId) return;
+    if (deleteId.startsWith('demo-')) {
+      deleteStoredDemoProduct(deleteId);
+      toast.success('Product deleted');
+      load();
+      setDeleteId(null);
+      return;
+    }
+
     const { error } = await supabase.from('products').delete().eq('id', deleteId);
     if (error) toast.error(error.message);
     else { toast.success('Product deleted'); load(); }
     setDeleteId(null);
   }
-
-  const DEMO_PRODUCTS = [
-    { id: 'd1', name: 'Premium Hard Case Luggage Bag', sku: 'LUG-001', wholesale_price: 1200, retail_price: 1650, status: 'active', brand: 'TravelPro', images: [PEXELS_PRODUCTS[0]], categories: { name: 'Luggage & Travel' }, inventory: { total_stock: 48, available_stock: 45 } },
-    { id: 'd2', name: 'Travel Backpack', sku: 'BPK-002', wholesale_price: 550, retail_price: 850, status: 'active', brand: 'Wildcraft', images: [PEXELS_PRODUCTS[1]], categories: { name: 'Luggage & Travel' }, inventory: { total_stock: 120, available_stock: 118 } },
-    { id: 'd3', name: 'Wireless Earbuds', sku: 'EAR-003', wholesale_price: 850, retail_price: 1299, status: 'active', brand: 'SoundMax', images: [PEXELS_PRODUCTS[2]], categories: { name: 'Electronics' }, inventory: { total_stock: 25, available_stock: 12 } },
-    { id: 'd4', name: 'Analog Watch', sku: 'WAT-004', wholesale_price: 1050, retail_price: 1650, status: 'active', brand: 'Fastrack', images: [PEXELS_PRODUCTS[3]], categories: { name: 'Accessories' }, inventory: { total_stock: 60, available_stock: 55 } },
-  ];
-
-  const displayProducts = filtered.length > 0 || loading ? filtered : DEMO_PRODUCTS as any;
+  const displayProducts = filtered;
 
   return (
     <div className="page-enter">

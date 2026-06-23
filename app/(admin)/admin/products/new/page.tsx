@@ -6,10 +6,13 @@ import { ArrowLeft, Upload, Plus, X } from 'lucide-react';
 import Link from 'next/link';
 import { AdminHeader } from '@/components/admin/header';
 import { supabase, Category } from '@/lib/supabase';
+import { useAuth } from '@/lib/auth-context';
+import { createDemoProductId, DEMO_CATEGORIES, saveStoredDemoProduct } from '@/lib/demo-products';
 import { toast } from 'sonner';
 
 export default function NewProductPage() {
   const router = useRouter();
+  const { profile } = useAuth();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [form, setForm] = useState({
@@ -22,7 +25,9 @@ export default function NewProductPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    supabase.from('categories').select('*').then(({ data }) => setCategories(data ?? []));
+    supabase.from('categories').select('*').then(({ data }) => {
+      setCategories(data?.length ? data : DEMO_CATEGORIES);
+    });
   }, []);
 
   function setField(k: string, v: string) { setForm((p) => ({ ...p, [k]: v })); }
@@ -77,6 +82,39 @@ export default function NewProductPage() {
     }
   }
 
+  async function hasAdminWriteSession() {
+    const { data: { session } } = await supabase.auth.getSession();
+    return Boolean(session);
+  }
+
+  function createLocalPreviewProduct(uploadedImages: string[]) {
+    const now = new Date().toISOString();
+    const stock = parseInt(form.initial_stock) || 0;
+    const category = categories.find((c) => c.id === form.category_id);
+
+    saveStoredDemoProduct({
+      id: createDemoProductId(),
+      name: form.name,
+      sku: form.sku,
+      description: form.description || null,
+      category_id: form.category_id || null,
+      brand: form.brand || null,
+      wholesale_price: parseFloat(form.wholesale_price),
+      retail_price: parseFloat(form.retail_price),
+      images: uploadedImages,
+      status: form.status as 'active' | 'inactive' | 'draft',
+      created_at: now,
+      updated_at: now,
+      categories: category ? { name: category.name } : null,
+      inventory: {
+        total_stock: stock,
+        available_stock: stock,
+        reserved_stock: 0,
+        low_stock_threshold: parseInt(form.low_stock_threshold) || 10,
+      },
+    });
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.name || !form.sku || !form.wholesale_price || !form.retail_price) {
@@ -84,36 +122,60 @@ export default function NewProductPage() {
     }
     setLoading(true);
 
-    let uploadedImages: string[] = [];
-    for (const img of images) {
-      if (img.startsWith('data:')) {
-        const url = await uploadImageToStorage(img, `${form.sku}-${Date.now()}.jpg`);
-        if (url) uploadedImages.push(url);
-      } else {
-        uploadedImages.push(img);
+    try {
+      const hasSession = await hasAdminWriteSession();
+
+      const uploadedImages: string[] = [];
+      for (const img of images) {
+        if (img.startsWith('data:')) {
+          if (hasSession) {
+            const url = await uploadImageToStorage(img, `${form.sku}-${Date.now()}.jpg`);
+            uploadedImages.push(url ?? img);
+          } else {
+            uploadedImages.push(img);
+          }
+        } else {
+          uploadedImages.push(img);
+        }
       }
+
+      if (!hasSession) {
+        if (profile?.role !== 'admin') {
+          throw new Error('Your admin session is not authenticated. Please log out and sign in again before creating products.');
+        }
+
+        createLocalPreviewProduct(uploadedImages);
+        toast.success('Product created in admin preview');
+        router.push('/admin/products');
+        return;
+      }
+
+      const { data: product, error } = await supabase.from('products').insert({
+        name: form.name, sku: form.sku, description: form.description || null,
+        category_id: form.category_id || null, brand: form.brand || null,
+        wholesale_price: parseFloat(form.wholesale_price),
+        retail_price: parseFloat(form.retail_price),
+        status: form.status, images: uploadedImages,
+      }).select().single();
+
+      if (error) throw new Error(error.message);
+
+      if (form.initial_stock) {
+        const { error: inventoryError } = await supabase.from('inventory').insert({
+          product_id: product.id,
+          total_stock: parseInt(form.initial_stock),
+          reserved_stock: 0,
+          low_stock_threshold: parseInt(form.low_stock_threshold) || 10,
+        });
+
+        if (inventoryError) throw new Error(inventoryError.message);
+      }
+      toast.success('Product created successfully!');
+      router.push('/admin/products');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not create product');
+      setLoading(false);
     }
-
-    const { data: product, error } = await supabase.from('products').insert({
-      name: form.name, sku: form.sku, description: form.description || null,
-      category_id: form.category_id || null, brand: form.brand || null,
-      wholesale_price: parseFloat(form.wholesale_price),
-      retail_price: parseFloat(form.retail_price),
-      status: form.status, images: uploadedImages,
-    }).select().single();
-
-    if (error) { toast.error(error.message); setLoading(false); return; }
-
-    if (form.initial_stock) {
-      await supabase.from('inventory').insert({
-        product_id: product.id,
-        total_stock: parseInt(form.initial_stock),
-        reserved_stock: 0,
-        low_stock_threshold: parseInt(form.low_stock_threshold) || 10,
-      });
-    }
-    toast.success('Product created successfully!');
-    router.push('/admin/products');
   }
 
   return (

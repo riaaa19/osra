@@ -20,85 +20,150 @@ const features = [
 
 export default function LoginPage() {
   const router = useRouter();
-  const { signIn } = useAuth();
+  const { signIn, refreshProfile, startDemoSession } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [selectedRole, setSelectedRole] = useState<RoleOption>('admin');
   const [loading, setLoading] = useState(false);
 
+  function getDemoRole(inputEmail: string): RoleOption | null {
+    const normalizedEmail = inputEmail.trim().toLowerCase();
+    if (normalizedEmail === 'admin@osra.in') return 'admin';
+    if (normalizedEmail === 'middleman@osra.in') return 'middleman';
+    return null;
+  }
+
+  function getDemoCredentials(role: RoleOption) {
+    return {
+      email: role === 'admin' ? 'admin@osra.in' : 'middleman@osra.in',
+      password: 'osra1234',
+    };
+  }
+
+  async function ensureDemoProfile(userId: string, demoEmail: string, role: RoleOption) {
+    const fullName = role === 'admin' ? 'OSRA Admin' : 'Rahul Boutique';
+    const { error: profileError } = await supabase.from('profiles').upsert({
+      id: userId,
+      email: demoEmail,
+      full_name: fullName,
+      role,
+      is_active: true,
+    });
+
+    if (profileError) throw new Error(profileError.message);
+
+    if (role !== 'middleman') return;
+
+    const middlemanPayload = {
+      user_id: userId,
+      business_name: 'Rahul Boutique',
+      store_slug: 'rahul-boutique',
+      phone: '+91 98765 43210',
+      status: 'active',
+    };
+
+    const { data: existingMiddleman, error: lookupError } = await supabase
+      .from('middlemen')
+      .select('id')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (lookupError) throw new Error(lookupError.message);
+
+    const { error: middlemanError } = existingMiddleman
+      ? await supabase.from('middlemen').update(middlemanPayload).eq('id', existingMiddleman.id)
+      : await supabase.from('middlemen').insert(middlemanPayload);
+
+    if (middlemanError) throw new Error(middlemanError.message);
+  }
+
+  async function redirectAfterLogin(fallbackRole: RoleOption) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      router.replace(fallbackRole === 'admin' ? '/admin' : '/middleman');
+      return;
+    }
+
+    const demoRole = getDemoRole(user.email ?? '');
+    if (demoRole) {
+      await ensureDemoProfile(user.id, user.email!, demoRole);
+      await refreshProfile();
+      router.replace(demoRole === 'admin' ? '/admin' : '/middleman');
+      return;
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    const role = profile?.role ?? fallbackRole;
+    router.replace(role === 'admin' ? '/admin' : '/middleman');
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!email || !password) { toast.error('Please fill in all fields'); return; }
     setLoading(true);
 
-    const { error } = await signIn(email, password);
-    if (error) {
-      toast.error(error);
+    try {
+      const demoRole = getDemoRole(email);
+      if (demoRole && password === 'osra1234') {
+        const { error } = await signIn(email.trim(), password);
+        if (error) throw new Error(error);
+        await redirectAfterLogin(demoRole);
+        toast.success(`Logged in as ${demoRole} demo`);
+        return;
+      }
+
+      const { error } = await signIn(email.trim(), password);
+      if (error) {
+        toast.error(error);
+        return;
+      }
+
+      await redirectAfterLogin(selectedRole);
+      toast.success('Welcome back!');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not complete login');
+    } finally {
       setLoading(false);
-      return;
     }
-
-    // Fetch actual role from DB and redirect accordingly
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', user.id)
-        .single();
-
-      const role = profile?.role ?? selectedRole;
-      toast.success('Welcome back!');
-      router.replace(role === 'admin' ? '/admin' : '/middleman');
-    } else {
-      toast.success('Welcome back!');
-      router.replace(selectedRole === 'admin' ? '/admin' : '/middleman');
-    }
-    setLoading(false);
   }
 
   async function loginAsDemo(role: RoleOption) {
     setLoading(true);
-    const demoEmail = role === 'admin' ? 'admin@osra.in' : 'middleman@osra.in';
-    const demoPassword = 'osra1234';
 
-    // Try to sign in; if fails, create the demo account
-    const { error: signInError } = await signIn(demoEmail, demoPassword);
-    if (signInError) {
-      // Create demo account
-      const { data, error: signUpError } = await supabase.auth.signUp({ email: demoEmail, password: demoPassword });
-      if (signUpError && !signUpError.message.includes('already registered')) {
-        toast.error('Could not create demo account: ' + signUpError.message);
-        setLoading(false);
+    try {
+      const { email, password } = getDemoCredentials(role);
+      const { error: signInError } = await signIn(email, password);
+      if (signInError) {
+        const { error: signUpError } = await supabase.auth.signUp({ email, password });
+        if (!signUpError) {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) {
+            await ensureDemoProfile(user.id, email, role);
+            await refreshProfile();
+            router.replace(role === 'admin' ? '/admin' : '/middleman');
+            toast.success(`Logged in as ${role} demo`);
+            return;
+          }
+        }
+
+        await startDemoSession(role);
+        toast.warning('Demo auth user was not found. Using read-only preview mode.');
+        router.replace(role === 'admin' ? '/admin' : '/middleman');
         return;
       }
-      if (data?.user) {
-        // Upsert profile
-        await supabase.from('profiles').upsert({
-          id: data.user.id,
-          email: demoEmail,
-          full_name: role === 'admin' ? 'OSRA Admin' : 'Rahul Boutique',
-          role,
-          is_active: true,
-        });
-        if (role === 'middleman') {
-          await supabase.from('middlemen').upsert({
-            user_id: data.user.id,
-            business_name: 'Rahul Boutique',
-            store_slug: 'rahul-boutique',
-            phone: '+91 98765 43210',
-            status: 'active',
-          });
-        }
-        // Sign in again after creating
-        await signIn(demoEmail, demoPassword);
-      }
+      await redirectAfterLogin(role);
+      toast.success(`Logged in as ${role} demo`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not complete demo login');
+    } finally {
+      setLoading(false);
     }
-
-    toast.success(`Logged in as ${role} demo`);
-    router.replace(role === 'admin' ? '/admin' : '/middleman');
-    setLoading(false);
   }
 
   return (

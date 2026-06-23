@@ -5,6 +5,7 @@ import { Search, Heart, ShoppingBag, X, ChevronDown, ImageOff } from 'lucide-rea
 import { MiddlemanHeader } from '@/components/middleman/header';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/utils';
+import { getStoredDemoProducts } from '@/lib/demo-products';
 import { toast } from 'sonner';
 
 const DEMO_PRODUCTS = [
@@ -31,7 +32,10 @@ export default function MarketplacePage() {
 
   useEffect(() => {
     supabase.from('products').select('*, categories(name), inventory(available_stock)').eq('status', 'active')
-      .then(({ data }) => setProducts(data?.length ? (data as any[]) : DEMO_PRODUCTS));
+      .then(({ data }) => {
+        const storedProducts = getStoredDemoProducts().filter((p) => p.status === 'active');
+        setProducts(data?.length ? [...storedProducts, ...(data as any[])] : [...storedProducts, ...DEMO_PRODUCTS]);
+      });
   }, []);
 
   function openPanel(p: any) {
