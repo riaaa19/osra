@@ -21,7 +21,7 @@ const DEMO_SESSION_KEY = 'osra-demo-session';
 const demoProfiles: Record<'admin' | 'middleman', Profile> = {
   admin: {
     id: '00000000-0000-4000-8000-000000000001',
-    email: 'admin@osra.in',
+    email: 'riaoswal403@gmail.com',
     full_name: 'OSRA Admin',
     phone: null,
     role: 'admin',

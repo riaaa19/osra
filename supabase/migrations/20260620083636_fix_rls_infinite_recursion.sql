@@ -71,3 +71,22 @@ DROP POLICY IF EXISTS "order_items_update_admin" ON public.order_items;
 DROP POLICY IF EXISTS "order_items_delete_admin" ON public.order_items;
 CREATE POLICY "order_items_update_admin" ON public.order_items FOR UPDATE TO authenticated USING (public.get_my_role() = 'admin');
 CREATE POLICY "order_items_delete_admin" ON public.order_items FOR DELETE TO authenticated USING (public.get_my_role() = 'admin');
+
+-- Allow the login form to resolve a middleman username to its auth email
+-- without exposing broad middlemen/profile table reads to anonymous users.
+CREATE OR REPLACE FUNCTION public.get_middleman_login_email(login_username TEXT)
+RETURNS TEXT
+LANGUAGE SQL
+SECURITY DEFINER
+STABLE
+SET search_path = public
+AS $$
+  SELECT p.email
+  FROM public.middlemen m
+  JOIN public.profiles p ON p.id = m.user_id
+  WHERE m.store_slug = lower(trim(login_username))
+    AND p.role = 'middleman'
+  LIMIT 1;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_middleman_login_email(TEXT) TO anon, authenticated;

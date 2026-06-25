@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Eye, EyeOff, Mail, Lock, User, Phone, Store, ArrowRight, ChevronDown, Info, BarChart2, Package, ShieldCheck } from 'lucide-react';
+import { Eye, EyeOff, Mail, Lock, User, Phone, Store, ArrowRight, ChevronDown, Info, BarChart2, Package, ShieldCheck, AtSign } from 'lucide-react';
 import { OsraLogo } from '@/components/osra-logo';
 import { supabase } from '@/lib/supabase';
 import { slugify } from '@/lib/utils';
@@ -12,15 +12,16 @@ import { toast } from 'sonner';
 const benefits = [
   { icon: Store, title: 'Your Own Storefront', desc: 'Get a unique store link and build your brand.' },
   { icon: Package, title: 'Wide Product Catalog', desc: 'Choose from thousands of wholesale products to sell.' },
-  { icon: ShieldCheck, title: 'Secure & Verified', desc: 'Dual OTP verification keeps your account safe.' },
+  { icon: ShieldCheck, title: 'Password Login', desc: 'Sign in with your username and password.' },
   { icon: BarChart2, title: 'Scale Your Network', desc: 'Connect with more customers and grow your business.' },
 ];
 
 export default function RegisterPage() {
   const router = useRouter();
-  const [form, setForm] = useState({ fullName: '', email: '', phone: '', businessName: '', password: '' });
+  const [form, setForm] = useState({ fullName: '', email: '', phone: '', businessName: '', username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState('');
 
   function setField(field: string, value: string) {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -28,37 +29,52 @@ export default function RegisterPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.fullName || !form.email || !form.phone || !form.businessName || !form.password) {
-      toast.error('Please fill in all fields');
+    setFormError('');
+    if (!form.fullName || !form.email || !form.phone || !form.businessName || !form.username || !form.password) {
+      const message = 'Please fill in all fields';
+      setFormError(message);
+      toast.error(message);
       return;
     }
     if (form.password.length < 8) {
-      toast.error('Password must be at least 8 characters');
+      const message = 'Password must be at least 8 characters';
+      setFormError(message);
+      toast.error(message);
       return;
     }
     setLoading(true);
-    const { data, error } = await supabase.auth.signUp({ email: form.email, password: form.password });
-    if (error) { toast.error(error.message); setLoading(false); return; }
-    if (data.user) {
-      const slug = slugify(form.businessName) + '-' + data.user.id.slice(0, 4);
-      await supabase.from('profiles').insert({
-        id: data.user.id,
-        email: form.email,
-        full_name: form.fullName,
-        phone: form.phone,
-        role: 'middleman',
+    try {
+      const response = await fetch('/api/auth/register-middleman', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...form,
+          email: form.email.trim().toLowerCase(),
+          username: slugify(form.username),
+        }),
       });
-      await supabase.from('middlemen').insert({
-        user_id: data.user.id,
-        business_name: form.businessName,
-        store_slug: slug,
-        phone: form.phone,
-        status: 'pending',
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Could not create account');
+      }
+
+      const { error } = await supabase.auth.signInWithPassword({
+        email: payload.email,
+        password: form.password,
       });
-      toast.success('Account created! Please verify your OTP.');
-      router.push(`/verify-otp?phone=${encodeURIComponent(form.phone)}`);
+
+      if (error) throw new Error(error.message);
+
+      toast.success('Account created. Welcome to OSRA!');
+      router.replace('/middleman');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not create account';
+      setFormError(message);
+      toast.error(message);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   return (
@@ -102,6 +118,12 @@ export default function RegisterPage() {
           <p className="text-slate-500 mt-1 text-sm">Fill in your details to get started with OSRA</p>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+            {formError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {formError}
+              </div>
+            )}
+
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1.5">Full Name</label>
               <div className="relative">
@@ -132,7 +154,7 @@ export default function RegisterPage() {
                   className="flex-1 px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 text-sm placeholder:text-slate-400 focus:outline-none focus:border-osra-primary focus:bg-white transition-colors" />
               </div>
               <p className="flex items-center gap-1 text-xs text-slate-400 mt-1">
-                <Info className="w-3 h-3" /> We will send OTP to this number via SMS.
+                <Info className="w-3 h-3" /> Used for business contact and account recovery.
               </p>
             </div>
 
@@ -148,6 +170,18 @@ export default function RegisterPage() {
                   <Info className="w-3 h-3" /> osra.com/store/{slugify(form.businessName)}
                 </p>
               )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Username</label>
+              <div className="relative">
+                <AtSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input value={form.username} onChange={(e) => setField('username', slugify(e.target.value))} placeholder="Choose a middleman username"
+                  className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 text-sm placeholder:text-slate-400 focus:outline-none focus:border-osra-primary focus:bg-white transition-colors" />
+              </div>
+              <p className="flex items-center gap-1 text-xs text-slate-400 mt-1">
+                <Info className="w-3 h-3" /> Use this username with your password to log in.
+              </p>
             </div>
 
             <div>

@@ -7,10 +7,12 @@ import { Eye, EyeOff, Mail, Lock, Users, ShieldCheck, ArrowRight, Package } from
 import { OsraLogo } from '@/components/osra-logo';
 import { useAuth } from '@/lib/auth-context';
 import { supabase } from '@/lib/supabase';
-import { cn } from '@/lib/utils';
+import { cn, slugify } from '@/lib/utils';
 import { toast } from 'sonner';
 
 type RoleOption = 'admin' | 'middleman';
+const ADMIN_EMAIL = 'riaoswal403@gmail.com';
+const ADMIN_PASSWORD = 'osra1234';
 
 const features = [
   { icon: Users, title: 'Multi-Tenant Network', desc: 'Empower your resellers with their own branded storefronts.' },
@@ -21,24 +23,56 @@ const features = [
 export default function LoginPage() {
   const router = useRouter();
   const { signIn, refreshProfile, startDemoSession } = useAuth();
-  const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [selectedRole, setSelectedRole] = useState<RoleOption>('admin');
+  const [selectedRole, setSelectedRole] = useState<RoleOption>('middleman');
   const [loading, setLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
 
-  function getDemoRole(inputEmail: string): RoleOption | null {
-    const normalizedEmail = inputEmail.trim().toLowerCase();
-    if (normalizedEmail === 'admin@osra.in') return 'admin';
-    if (normalizedEmail === 'middleman@osra.in') return 'middleman';
+  function getDemoRole(input: string): RoleOption | null {
+    const normalized = input.trim().toLowerCase();
+    if (['admin', 'admin@osra.in', ADMIN_EMAIL].includes(normalized)) return 'admin';
+    if (['middleman@osra.in', 'middleman', 'rahul-boutique'].includes(normalized)) return 'middleman';
     return null;
+  }
+
+  async function resolveLoginEmail(input: string) {
+    const trimmed = input.trim().toLowerCase();
+    const demoRole = getDemoRole(trimmed);
+    if (demoRole) return getDemoCredentials(demoRole).email;
+    if (trimmed.includes('@')) return trimmed;
+
+    const response = await fetch('/api/auth/resolve-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: trimmed }),
+    });
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error ?? 'Could not find that middleman username');
+    }
+
+    return payload.email as string;
   }
 
   function getDemoCredentials(role: RoleOption) {
     return {
-      email: role === 'admin' ? 'admin@osra.in' : 'middleman@osra.in',
-      password: 'osra1234',
+      email: role === 'admin' ? ADMIN_EMAIL : 'middleman@osra.in',
+      password: role === 'admin' ? ADMIN_PASSWORD : 'osra1234',
     };
+  }
+
+  async function ensureBuiltInAdmin() {
+    const response = await fetch('/api/auth/ensure-admin', { method: 'POST' });
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error ?? 'Could not prepare admin login');
+    }
+
+    return payload.email as string;
   }
 
   async function ensureDemoProfile(userId: string, demoEmail: string, role: RoleOption) {
@@ -78,6 +112,33 @@ export default function LoginPage() {
     if (middlemanError) throw new Error(middlemanError.message);
   }
 
+  async function ensureMiddlemanProfile(userId: string, userEmail: string) {
+    const emailName = userEmail.split('@')[0] || 'middleman';
+    const businessName = emailName
+      .replace(/[._-]+/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+    const storeSlug = `${slugify(emailName)}-${userId.slice(0, 4)}`;
+
+    const { error: profileError } = await supabase.from('profiles').insert({
+      id: userId,
+      email: userEmail,
+      full_name: businessName,
+      role: 'middleman',
+      is_active: true,
+    });
+
+    if (profileError) throw new Error(profileError.message);
+
+    const { error: middlemanError } = await supabase.from('middlemen').insert({
+      user_id: userId,
+      business_name: businessName,
+      store_slug: storeSlug,
+      status: 'active',
+    });
+
+    if (middlemanError) throw new Error(middlemanError.message);
+  }
+
   async function redirectAfterLogin(fallbackRole: RoleOption) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
@@ -93,11 +154,24 @@ export default function LoginPage() {
       return;
     }
 
-    const { data: profile } = await supabase
+    const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('role')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
+
+    if (profileError) throw new Error(profileError.message);
+
+    if (!profile && !profileError && fallbackRole === 'middleman' && user.email) {
+      await ensureMiddlemanProfile(user.id, user.email);
+      await refreshProfile();
+      router.replace('/middleman');
+      return;
+    }
+
+    if (!profile && fallbackRole === 'middleman') {
+      throw new Error('Logged in, but this account is missing middleman profile details.');
+    }
 
     const role = profile?.role ?? fallbackRole;
     router.replace(role === 'admin' ? '/admin' : '/middleman');
@@ -105,21 +179,31 @@ export default function LoginPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!email || !password) { toast.error('Please fill in all fields'); return; }
+    setLoginError('');
+    if (!identifier || !password) {
+      const message = 'Please fill in all fields';
+      setLoginError(message);
+      toast.error(message);
+      return;
+    }
     setLoading(true);
 
     try {
-      const demoRole = getDemoRole(email);
+      const demoRole = getDemoRole(identifier);
+      const loginEmail = demoRole === 'admin'
+        ? await ensureBuiltInAdmin()
+        : await resolveLoginEmail(identifier);
       if (demoRole && password === 'osra1234') {
-        const { error } = await signIn(email.trim(), password);
+        const { error } = await signIn(loginEmail, password);
         if (error) throw new Error(error);
         await redirectAfterLogin(demoRole);
         toast.success(`Logged in as ${demoRole} demo`);
         return;
       }
 
-      const { error } = await signIn(email.trim(), password);
+      const { error } = await signIn(loginEmail, password);
       if (error) {
+        setLoginError(error);
         toast.error(error);
         return;
       }
@@ -127,7 +211,9 @@ export default function LoginPage() {
       await redirectAfterLogin(selectedRole);
       toast.success('Welcome back!');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not complete login');
+      const message = error instanceof Error ? error.message : 'Could not complete login';
+      setLoginError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -138,15 +224,18 @@ export default function LoginPage() {
 
     try {
       const { email, password } = getDemoCredentials(role);
-      const { error: signInError } = await signIn(email, password);
+      const roleRoute = role === 'admin' ? '/admin' : '/middleman';
+      const loginEmail = role === 'admin' ? await ensureBuiltInAdmin() : email;
+      const { error: signInError } = await signIn(loginEmail, password);
       if (signInError) {
+        if (role === 'admin') throw new Error(signInError);
         const { error: signUpError } = await supabase.auth.signUp({ email, password });
         if (!signUpError) {
           const { data: { user } } = await supabase.auth.getUser();
           if (user) {
             await ensureDemoProfile(user.id, email, role);
             await refreshProfile();
-            router.replace(role === 'admin' ? '/admin' : '/middleman');
+            router.replace(roleRoute);
             toast.success(`Logged in as ${role} demo`);
             return;
           }
@@ -154,7 +243,7 @@ export default function LoginPage() {
 
         await startDemoSession(role);
         toast.warning('Demo auth user was not found. Using read-only preview mode.');
-        router.replace(role === 'admin' ? '/admin' : '/middleman');
+        router.replace(roleRoute);
         return;
       }
       await redirectAfterLogin(role);
@@ -226,11 +315,17 @@ export default function LoginPage() {
           <p className="text-slate-500 mt-1 text-sm">Enter your credentials to access your dashboard</p>
 
           <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+            {loginError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {loginError}
+              </div>
+            )}
+
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">Email Address</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Email or Username</label>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your email"
+                <input value={identifier} onChange={(e) => { setIdentifier(e.target.value); setLoginError(''); }} placeholder="Enter email or middleman username"
                   className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm placeholder:text-slate-400 focus:outline-none focus:border-osra-primary focus:bg-white transition-colors" />
               </div>
             </div>
@@ -239,7 +334,7 @@ export default function LoginPage() {
               <label className="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password"
+                <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => { setPassword(e.target.value); setLoginError(''); }} placeholder="Enter your password"
                   className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm placeholder:text-slate-400 focus:outline-none focus:border-osra-primary focus:bg-white transition-colors" />
                 <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
